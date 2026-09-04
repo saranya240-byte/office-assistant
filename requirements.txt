@@ -6,8 +6,6 @@ google-generativeai
 python-dotenv
 pandas
 pytest
-<<<<<<< HEAD
 google-generativeai
 python-dotenv
-=======
->>>>>>> b0e8ba2 (testing done)
+
