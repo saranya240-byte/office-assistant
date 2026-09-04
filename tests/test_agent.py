@@ -13,7 +13,6 @@ def test_policy_intent():
     assert result == "POLICY"
 
 
-
 def test_reimbursement_policy_intent():
     result = classify_intent(
         "What is the reimbursement policy?"
@@ -83,7 +82,6 @@ def test_expense_orchestrator():
     assert result["route"] == "EMPLOYEE_TOOL"
     assert result["result"]["success"] is True
 
-
 def test_policy_orchestrator():
     result = process_query(
         "What is the WFH policy?",
@@ -92,3 +90,33 @@ def test_policy_orchestrator():
 
     assert result["intent"] == "POLICY"
     assert result["route"] == "RAG"
+
+
+def test_leave_action_orchestrator():
+    result = process_query(
+        "I want casual leave from 2026-10-12 to 2026-10-13 for personal work",
+        EMPLOYEE_ID,
+    )
+
+    assert result["intent"] == "APPLY_LEAVE"
+    assert result["route"] == "ACTION_TOOL"
+
+    assert result["parameters"]["leave_type"] == "Casual Leave"
+    assert result["parameters"]["start_date"] == "2026-10-12"
+    assert result["parameters"]["end_date"] == "2026-10-13"
+
+    assert result["result"]["success"] is True
+
+
+def test_policy_rag_integration():
+    result = process_query(
+        "What is the WFH policy?",
+        EMPLOYEE_ID,
+    )
+
+    assert result["intent"] == "POLICY"
+    assert result["route"] == "RAG"
+
+    assert result["result"]["success"] is True
+    assert len(result["result"]["results"]) > 0
+    assert len(result["result"]["citations"]) > 0

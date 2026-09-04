@@ -1,6 +1,8 @@
 from app.agents.intent_agent import classify_intent
 from app.agents.employee_agent import handle_employee_query
 from app.agents.action_agent import handle_action
+from app.agents.parameter_agent import extract_leave_parameters
+from app.agents.policy_agent import handle_policy_query
 
 
 def process_query(
@@ -12,26 +14,28 @@ def process_query(
     reason: str = "",
 ) -> dict:
 
-    # ----------------------------------------
-    # 1. Understand user intent
-    # ----------------------------------------
+    # -----------------------------------------
+    # Step 1: Classify user intent
+    # -----------------------------------------
     intent = classify_intent(query)
 
-    # ----------------------------------------
-    # 2. Policy → RAG
-    # ----------------------------------------
+    # -----------------------------------------
+    # Step 2: Handle policy queries using RAG
+    # -----------------------------------------
     if intent == "POLICY":
+
+        result = handle_policy_query(query)
 
         return {
             "intent": intent,
             "route": "RAG",
             "query": query,
-            "message": "This query should be handled by the RAG agent."
+            "result": result,
         }
 
-    # ----------------------------------------
-    # 3. Employee data → Tools
-    # ----------------------------------------
+    # -----------------------------------------
+    # Step 3: Handle employee-specific queries
+    # -----------------------------------------
     if intent in {
         "EMPLOYEE_INFO",
         "LEAVE_BALANCE",
@@ -52,29 +56,45 @@ def process_query(
             "result": result,
         }
 
-    # ----------------------------------------
-    # 4. Actions
-    # ----------------------------------------
+    # -----------------------------------------
+    # Step 4: Handle action requests
+    # -----------------------------------------
     if intent == "APPLY_LEAVE":
+
+        # Extract parameters from natural language
+        parameters = extract_leave_parameters(query)
+
+        # If parameters were not found in the query,
+        # use values passed directly to the orchestrator.
+        final_leave_type = parameters["leave_type"] or leave_type
+        final_start_date = parameters["start_date"] or start_date
+        final_end_date = parameters["end_date"] or end_date
+        final_reason = parameters["reason"] or reason
 
         result = handle_action(
             intent=intent,
             employee_id=employee_id,
-            leave_type=leave_type,
-            start_date=start_date,
-            end_date=end_date,
-            reason=reason,
+            leave_type=final_leave_type,
+            start_date=final_start_date,
+            end_date=final_end_date,
+            reason=final_reason,
         )
 
         return {
             "intent": intent,
             "route": "ACTION_TOOL",
+            "parameters": {
+                "leave_type": final_leave_type,
+                "start_date": final_start_date,
+                "end_date": final_end_date,
+                "reason": final_reason,
+            },
             "result": result,
         }
 
-    # ----------------------------------------
-    # 5. Unknown
-    # ----------------------------------------
+    # -----------------------------------------
+    # Step 5: Unknown intent
+    # -----------------------------------------
     return {
         "intent": "UNKNOWN",
         "route": "NONE",

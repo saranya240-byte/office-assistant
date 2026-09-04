@@ -18,8 +18,15 @@ def classify_intent(query: str) -> str:
         "apply leave",
         "apply for leave",
         "request leave",
+        "request for leave",
         "take leave",
         "book leave",
+        "want casual leave",
+        "want earned leave",
+        "want sick leave",
+        "need casual leave",
+        "need earned leave",
+        "need sick leave",
     ]):
         return "APPLY_LEAVE"
 
