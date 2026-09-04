@@ -8,14 +8,17 @@ def load_pdf(file_path: str) -> list[dict]:
 
     Each record contains:
         - text
-        - source
-        - page
+        - metadata
+            - source
+            - page
     """
 
     path = Path(file_path)
 
     if not path.exists():
-        raise FileNotFoundError(f"PDF not found: {file_path}")
+        raise FileNotFoundError(
+            f"PDF not found: {file_path}"
+        )
 
     reader = PdfReader(str(path))
 
@@ -23,7 +26,6 @@ def load_pdf(file_path: str) -> list[dict]:
 
     for page_number, page in enumerate(reader.pages, start=1):
         text = page.extract_text() or ""
-
         text = text.strip()
 
         if not text:
@@ -70,13 +72,36 @@ def load_all_pdfs(knowledge_base_path: str) -> list[dict]:
 
 if __name__ == "__main__":
 
-    documents = load_all_pdfs("app/knowledge_base")
+    # Find the project root automatically
+    PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
-    print(f"Loaded {len(documents)} pages")
+    # Correct knowledge base location:
+    # office-assistant/app/knowledge_base/
+    knowledge_base_path = PROJECT_ROOT / "app" / "knowledge_base"
+
+    print("Knowledge base path:")
+    print(knowledge_base_path)
+
+    documents = load_all_pdfs(
+        str(knowledge_base_path)
+    )
+
+    print(f"\nLoaded {len(documents)} pages")
 
     for document in documents[:3]:
+
         print("\n-----------------------------")
-        print("Source:", document["metadata"]["source"])
-        print("Page:", document["metadata"]["page"])
+
+        print(
+            "Source:",
+            document["metadata"]["source"]
+        )
+
+        print(
+            "Page:",
+            document["metadata"]["page"]
+        )
+
         print("Text:")
+
         print(document["text"][:500])
