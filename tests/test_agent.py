@@ -13,6 +13,15 @@ def test_policy_intent():
     assert result == "POLICY"
 
 
+
+def test_reimbursement_policy_intent():
+    result = classify_intent(
+        "What is the reimbursement policy?"
+    )
+
+    assert result == "POLICY"
+
+
 def test_leave_intent():
     result = classify_intent(
         "How many leaves do I have?"
