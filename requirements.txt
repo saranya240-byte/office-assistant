@@ -2,5 +2,7 @@ pypdf
 sentence-transformers
 numpy
 faiss-cpu
+openai
+python-dotenv
 pandas
 pytest
