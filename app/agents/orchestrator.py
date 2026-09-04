@@ -3,6 +3,7 @@ from app.agents.employee_agent import handle_employee_query
 from app.agents.action_agent import handle_action
 from app.agents.parameter_agent import extract_leave_parameters
 from app.agents.policy_agent import handle_policy_query
+from app.agents.response_agent import generate_response
 
 
 def process_query(
@@ -14,28 +15,22 @@ def process_query(
     reason: str = "",
 ) -> dict:
 
-    # -----------------------------------------
-    # Step 1: Classify user intent
-    # -----------------------------------------
     intent = classify_intent(query)
 
-    # -----------------------------------------
-    # Step 2: Handle policy queries using RAG
-    # -----------------------------------------
+    # Policy → RAG → Gemini Response
     if intent == "POLICY":
-
         result = handle_policy_query(query)
+        response = generate_response(result)
 
         return {
             "intent": intent,
             "route": "RAG",
             "query": query,
             "result": result,
+            "response": response,
         }
 
-    # -----------------------------------------
-    # Step 3: Handle employee-specific queries
-    # -----------------------------------------
+    # Employee query → Employee Tool → Gemini Response
     if intent in {
         "EMPLOYEE_INFO",
         "LEAVE_BALANCE",
@@ -43,29 +38,25 @@ def process_query(
         "IT_ASSET",
         "OFFICE",
     }:
-
         result = handle_employee_query(
             intent=intent,
             employee_id=employee_id,
             query=query,
         )
 
+        response = generate_response(result)
+
         return {
             "intent": intent,
             "route": "EMPLOYEE_TOOL",
             "result": result,
+            "response": response,
         }
 
-    # -----------------------------------------
-    # Step 4: Handle action requests
-    # -----------------------------------------
+    # Action → Action Tool → Gemini Response
     if intent == "APPLY_LEAVE":
-
-        # Extract parameters from natural language
         parameters = extract_leave_parameters(query)
 
-        # If parameters were not found in the query,
-        # use values passed directly to the orchestrator.
         final_leave_type = parameters["leave_type"] or leave_type
         final_start_date = parameters["start_date"] or start_date
         final_end_date = parameters["end_date"] or end_date
@@ -80,6 +71,8 @@ def process_query(
             reason=final_reason,
         )
 
+        response = generate_response(result)
+
         return {
             "intent": intent,
             "route": "ACTION_TOOL",
@@ -90,16 +83,18 @@ def process_query(
                 "reason": final_reason,
             },
             "result": result,
+            "response": response,
         }
 
-    # -----------------------------------------
-    # Step 5: Unknown intent
-    # -----------------------------------------
+    # Unknown
+    response = (
+        "I couldn't determine what you're asking. "
+        "Please rephrase your request."
+    )
+
     return {
         "intent": "UNKNOWN",
         "route": "NONE",
-        "message": (
-            "I couldn't determine what you're asking. "
-            "Please rephrase your request."
-        ),
+        "message": response,
+        "response": response,
     }
