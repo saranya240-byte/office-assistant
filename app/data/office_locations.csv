@@ -1,0 +1,7 @@
+office_id,location,address,working_hours,working_days
+OFF001,Bengaluru,"RMZ Ecoworld, Bengaluru",9 AM - 6 PM,Mon-Fri
+OFF002,Hyderabad,"HITEC City, Hyderabad",9 AM - 6 PM,Mon-Fri
+OFF003,Pune,"EON IT Park, Pune",9 AM - 6 PM,Mon-Fri
+OFF004,Mumbai,"BKC, Mumbai",9 AM - 6 PM,Mon-Fri
+OFF005,Chennai,"Taramani, Chennai",9 AM - 6 PM,Mon-Fri
+OFF006,Delhi,"Cyber City, Delhi NCR",9 AM - 6 PM,Mon-Fri
