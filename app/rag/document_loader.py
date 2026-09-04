@@ -70,7 +70,7 @@ def load_all_pdfs(knowledge_base_path: str) -> list[dict]:
 
 if __name__ == "__main__":
 
-    documents = load_all_pdfs("../knowledge_base")
+    documents = load_all_pdfs("app/knowledge_base")
 
     print(f"Loaded {len(documents)} pages")
 
