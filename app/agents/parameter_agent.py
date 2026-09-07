@@ -2,12 +2,9 @@ import json
 import re
 from datetime import datetime
 
-from google import genai
+import ollama
 
-from app.utils.config import GEMINI_API_KEY, GEMINI_MODEL
-
-
-client = genai.Client(api_key=GEMINI_API_KEY)
+from app.utils.config import OLLAMA_MODEL
 
 
 PARAMETER_PROMPT = """
@@ -46,9 +43,9 @@ Rules:
 
 def extract_leave_parameters(query: str) -> dict:
     """
-    Extract leave parameters using Gemini.
+    Extract leave parameters using Ollama.
 
-    If Gemini fails or returns invalid information,
+    If Ollama fails or returns invalid information,
     fall back to deterministic regex-based extraction.
     """
 
@@ -58,7 +55,7 @@ def extract_leave_parameters(query: str) -> dict:
         return empty_parameters()
 
     # -----------------------------------
-    # Try Gemini first
+    # Try Ollama first
     # -----------------------------------
     try:
         prompt = f"""
@@ -70,27 +67,50 @@ Employee query:
 JSON:
 """
 
-        response = client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=prompt,
+        response = ollama.chat(
+            model=OLLAMA_MODEL,
+            messages=[
+                {
+                    "role": "user",
+                    "content": prompt,
+                }
+            ],
         )
 
-        if response.text:
-            text = response.text.strip()
+        text = response["message"]["content"]
 
-            # Remove markdown code fences if Gemini adds them
-            text = re.sub(r"```json\s*", "", text, flags=re.IGNORECASE)
+        if text:
+            text = text.strip()
+
+            # Remove markdown code fences if Ollama adds them
+            text = re.sub(
+                r"```json\s*",
+                "",
+                text,
+                flags=re.IGNORECASE,
+            )
             text = re.sub(r"```\s*", "", text)
 
             data = json.loads(text)
 
             if isinstance(data, dict):
                 result = {
-                    "leave_type": str(data.get("leave_type", "")).strip(),
-                    "start_date": str(data.get("start_date", "")).strip(),
-                    "end_date": str(data.get("end_date", "")).strip(),
-                    "reason": str(data.get("reason", "")).strip(),
-                }
+                            "leave_type": str(
+                                data.get("leave_type", "")
+                            ).strip(),
+
+                            "start_date": str(
+                                data.get("start_date", "")
+                            ).strip(),
+
+                            "end_date": str(
+                                data.get("end_date", "")
+                            ).strip(),
+
+                            "reason": str(
+                                data.get("reason", "")
+                            ).strip().lower(),
+                        }
 
                 # Validate leave type
                 valid_leave_types = {
@@ -116,7 +136,7 @@ JSON:
                 return result
 
     except Exception:
-        # Gemini failure → use deterministic fallback
+        # Ollama failure → use deterministic fallback
         pass
 
     # -----------------------------------
@@ -194,8 +214,12 @@ def normalize_date(date_string: str) -> str:
 
     for date_format in formats:
         try:
-            date = datetime.strptime(date_string, date_format)
+            date = datetime.strptime(
+                date_string,
+                date_format,
+            )
             return date.strftime("%Y-%m-%d")
+
         except ValueError:
             continue
 
