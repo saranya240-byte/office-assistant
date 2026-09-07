@@ -3,6 +3,36 @@ from app.agents.employee_agent import handle_employee_query
 from app.agents.action_agent import handle_action
 from app.agents.parameter_agent import extract_leave_parameters
 from app.agents.policy_agent import handle_policy_query
+from app.agents.response_agent import generate_response
+
+from app.utils.memory import (
+    get_short_term_memory,
+    get_long_term_memory,
+    format_conversation,
+)
+
+
+def build_context(messages: list[dict]) -> str:
+    """
+    Convert previous conversation messages into a simple text context.
+    Only the most recent 10 messages are included.
+    """
+
+    if not messages:
+        return ""
+
+    recent_messages = messages[-10:]
+
+    context_lines = []
+
+    for message in recent_messages:
+        role = message.get("role", "").capitalize()
+        content = message.get("content", "").strip()
+
+        if content:
+            context_lines.append(f"{role}: {content}")
+
+    return "\n".join(context_lines)
 
 
 def process_query(
@@ -12,30 +42,82 @@ def process_query(
     start_date: str = "",
     end_date: str = "",
     reason: str = "",
+    conversation_history: list[dict] | None = None,
 ) -> dict:
 
-    # -----------------------------------------
-    # Step 1: Classify user intent
-    # -----------------------------------------
-    intent = classify_intent(query)
+    conversation_history = conversation_history or []
 
-    # -----------------------------------------
-    # Step 2: Handle policy queries using RAG
-    # -----------------------------------------
+    # ---------------------------------------------------------
+    # Get conversation memory
+    # ---------------------------------------------------------
+
+    short_term = get_short_term_memory(
+        conversation_history,
+        limit=10,
+    )
+
+    long_term = get_long_term_memory(
+        employee_id,
+        limit=10,
+    )
+
+    short_term_context = format_conversation(short_term)
+    long_term_context = format_conversation(long_term)
+
+    context = "\n".join(
+        part
+        for part in [
+            short_term_context,
+            long_term_context,
+        ]
+        if part
+    )
+
+    # ---------------------------------------------------------
+    # Classify intent
+    # ---------------------------------------------------------
+
+    if context:
+        intent_query = f"""
+Previous conversation context:
+
+{context}
+
+Current employee query:
+
+{query}
+
+Determine the intent of the CURRENT query.
+"""
+
+        intent = classify_intent(intent_query)
+
+    else:
+        intent = classify_intent(query)
+
+    # ---------------------------------------------------------
+    # Policy → RAG → Gemini Response
+    # ---------------------------------------------------------
+
     if intent == "POLICY":
 
         result = handle_policy_query(query)
+
+        response = generate_response(result)
 
         return {
             "intent": intent,
             "route": "RAG",
             "query": query,
+            "conversation_context": context,
             "result": result,
+            "response": response,
         }
 
-    # -----------------------------------------
-    # Step 3: Handle employee-specific queries
-    # -----------------------------------------
+    # ---------------------------------------------------------
+    # Employee query → Employee Tool → Gemini Response
+    # ---------------------------------------------------------
+
     if intent in {
         "EMPLOYEE_INFO",
         "LEAVE_BALANCE",
@@ -50,22 +132,40 @@ def process_query(
             query=query,
         )
 
+        response = generate_response(result)
+
         return {
             "intent": intent,
             "route": "EMPLOYEE_TOOL",
+            "query": query,
+            "conversation_context": context,
             "result": result,
+            "response": response,
         }
 
-    # -----------------------------------------
-    # Step 4: Handle action requests
-    # -----------------------------------------
+    # ---------------------------------------------------------
+    # Action → Parameter Extraction → Action Tool
+    # ---------------------------------------------------------
+
     if intent == "APPLY_LEAVE":
 
-        # Extract parameters from natural language
-        parameters = extract_leave_parameters(query)
+        parameter_query = query
 
-        # If parameters were not found in the query,
-        # use values passed directly to the orchestrator.
+        if context:
+            parameter_query = f"""
+Previous conversation context:
+
+{context}
+
+Current employee query:
+
+{query}
+
+Extract the leave parameters for the CURRENT request.
+"""
+
+        parameters = extract_leave_parameters(parameter_query)
+
         final_leave_type = parameters["leave_type"] or leave_type
         final_start_date = parameters["start_date"] or start_date
         final_end_date = parameters["end_date"] or end_date
@@ -80,9 +180,13 @@ def process_query(
             reason=final_reason,
         )
 
+        response = generate_response(result)
+
         return {
             "intent": intent,
             "route": "ACTION_TOOL",
+            "query": query,
+            "conversation_context": context,
             "parameters": {
                 "leave_type": final_leave_type,
                 "start_date": final_start_date,
@@ -90,16 +194,23 @@ def process_query(
                 "reason": final_reason,
             },
             "result": result,
+            "response": response,
         }
 
-    # -----------------------------------------
-    # Step 5: Unknown intent
-    # -----------------------------------------
+    # ---------------------------------------------------------
+    # Unknown
+    # ---------------------------------------------------------
+
+    response = (
+        "I couldn't determine what you're asking. "
+        "Please rephrase your request."
+    )
+
     return {
         "intent": "UNKNOWN",
         "route": "NONE",
-        "message": (
-            "I couldn't determine what you're asking. "
-            "Please rephrase your request."
-        ),
+        "query": query,
+        "conversation_context": context,
+        "message": response,
+        "response": response,
     }

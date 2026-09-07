@@ -6,3 +6,6 @@ google-generativeai
 python-dotenv
 pandas
 pytest
+google-generativeai
+python-dotenv
+
