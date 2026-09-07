@@ -1,186 +1,246 @@
+import re
+
+
+INTENTS = [
+    "POLICY",
+    "EMPLOYEE_INFO",
+    "LEAVE_BALANCE",
+    "EXPENSE",
+    "IT_ASSET",
+    "OFFICE",
+    "APPLY_LEAVE",
+    "UNKNOWN",
+]
+
+
+# A small, explicit map of common typos actually seen in testing.
+# Deliberately NOT a general fuzzy-matcher: a broad fuzzy corrector
+# over the whole vocabulary risks silently "correcting" unrelated
+# words and misrouting the query in ways that are hard to trace.
+# This map only fires on an exact whole-word match, so it's safe
+# and predictable — extend it as new typos turn up.
+TYPO_CORRECTIONS = {
+    "manger": "manager",
+    "expresses": "expenses",
+    "loose": "lose",
+}
+
+
+def _apply_typo_corrections(query: str) -> str:
+    for typo, correction in TYPO_CORRECTIONS.items():
+        query = re.sub(rf"\b{typo}\b", correction, query)
+    return query
+
+
+# --------------------------------------------------------------
+# APPLY_LEAVE regexes
+#
+# The old version matched fixed phrases like "want sick leave" as
+# an exact substring. That broke the moment a real user inserted
+# a word — "i want 1 sick leave", "can i apply for a leave" — since
+# "1" or "a" isn't in the literal phrase. These patterns instead
+# allow a small gap (0-3 extra words) between the trigger word and
+# "leave", so insertions like numbers or articles don't break the
+# match. They intentionally look for singular "leave" (via \b),
+# not "leaves", so they don't collide with LEAVE_BALANCE phrasing
+# like "how many casual leaves do I have".
+# --------------------------------------------------------------
+
+_ACTION_LEAVE_PATTERN = re.compile(
+    r"\b(?:apply|applying|request|requesting|book|booking|take|taking)\b"
+    r"(?:\s+\w+){0,3}?\s+leave\b"
+)
+
+_TYPE_LEAVE_PATTERN = re.compile(
+    r"\b(?:want|need|require|requesting)\b"
+    r"(?:\s+\w+){0,3}?\s+(?:casual|earned|sick)\s+leave\b"
+)
+
+
 def classify_intent(query: str) -> str:
-    """
-    Classify the employee query.
-
-    Strong deterministic rules are checked first because they provide
-    predictable behavior for well-known office-assistant queries.
-    Ollama is used for queries that are not clearly identified by rules.
-    """
-
-    query = query.strip()
-
-    if not query:
-        return "UNKNOWN"
-
-    # First use deterministic rules for clear cases.
-    fallback_intent = classify_intent_fallback(query)
-
-    if fallback_intent != "UNKNOWN":
-        return fallback_intent
-
-    # Use Ollama for queries that are not clearly classified.
-    try:
-        prompt = f"""
-{INTENT_PROMPT}
-
-Employee query:
-{query}
-
-Intent:
-"""
-
-        response = ollama.chat(
-            model=OLLAMA_MODEL,
-            messages=[
-                {
-                    "role": "user",
-                    "content": prompt,
-                }
-            ],
-        )
-
-        answer = response["message"]["content"]
-
-        if answer:
-            intent = answer.strip().upper()
-            intent = re.sub(r"[^A-Z_]", "", intent)
-
-            if intent in INTENTS:
-                return intent
-
-    except Exception:
-        pass
-
-    return "UNKNOWN"
-
-def classify_intent_fallback(query: str) -> str:
-    """
-    Deterministic fallback classifier.
-
-    This preserves the original keyword-based behavior.
-    """
-
     query = query.strip().lower()
 
-    # Leave action
-    if any(phrase in query for phrase in [
-        "apply leave",
-        "apply for leave",
-        "apply for casual leave",
-        "apply for earned leave",
-        "apply for sick leave",
-        "request leave",
-        "request for leave",
-        "request casual leave",
-        "request earned leave",
-        "request sick leave",
-        "take leave",
-        "take casual leave",
-        "take earned leave",
-        "take sick leave",
-        "take time off",
-        "take a day off",
-        "take days off",
-        "need time off",
-        "need leave",
-        "need casual leave",
-        "need earned leave",
-        "need sick leave",
-        "want time off",
-        "want leave",
-        "want casual leave",
-        "want earned leave",
-        "want sick leave",
-        "want to apply for leave",
-        "want to apply for casual leave",
-        "want to apply for earned leave",
-        "want to apply for sick leave",
-        "book leave",
-        "book casual leave",
-        "book earned leave",
-        "book sick leave",
-    ]):
+    # Normalize hyphens to spaces so phrases like "work-from-home"
+    # match the same way "work from home" does. Without this,
+    # the assignment's own example question ("How many
+    # work-from-home days...") falls through to UNKNOWN.
+    query = query.replace("-", " ")
+
+    query = _apply_typo_corrections(query)
+
+    # --------------------------------------------------------
+    # 1. APPLY LEAVE (most specific — an action request)
+    # --------------------------------------------------------
+    if _ACTION_LEAVE_PATTERN.search(query) or _TYPE_LEAVE_PATTERN.search(query):
         return "APPLY_LEAVE"
-    # Leave balance
-    if any(phrase in query for phrase in [
-        "leave balance",
-        "how many leaves",
-        "how much leave",
-        "leaves do i have",
-        "remaining leave",
-        "wfh days have i used",
-    ]):
+
+    # --------------------------------------------------------
+    # 2. LEAVE BALANCE (specific personal-data request)
+    # --------------------------------------------------------
+    if any(
+        phrase in query
+        for phrase in [
+            "leave balance",
+            "how many leaves",
+            "how much leave",
+            "leaves do i have",
+            "remaining leave",
+            "how many casual leaves",
+            "how many sick leaves",
+            "how many earned leaves",
+        ]
+    ):
         return "LEAVE_BALANCE"
 
-    # Company policies
-    if any(phrase in query for phrase in [
-        "policy",
-        "policies",
-        "allowed",
-        "eligible",
-        "how many wfh days can",
-        "work from home",
-        "working remotely",
-        "rules around working remotely",
-        "rules for working remotely",
-        "remote work rules",
-        "remote working rules",
-        "can i work remotely",
-        "can i work from home",
-        "travel policy",
-        "leave policy",
-        "it policy",
-        "reimbursement policy",
-        "reimbursement rules",
-    ]):
+    # --------------------------------------------------------
+    # 3. POLICY (general company-document questions)
+    #
+    #    IMPORTANT: this is checked BEFORE OFFICE and IT_ASSET.
+    #    Previously "what is the IT policy for laptops" or
+    #    "reimbursement policy for a lost laptop" matched
+    #    IT_ASSET first (because of "laptop") instead of POLICY,
+    #    even though the employee was asking about the document,
+    #    not their own assigned device.
+    # --------------------------------------------------------
+    if any(
+        phrase in query
+        for phrase in [
+            "policy",
+            "policies",
+            "allowed",
+            "eligible",
+            "rules",
+            "wfh",
+            "work from home",
+            "working from home",
+            "how many wfh days",
+            "travel policy",
+            "leave policy",
+            "it policy",
+            "reimbursement policy",
+            "reimbursement rules",
+            "expense policy",
+            "security policy",
+            "employee handbook",
+            "handbook",
+            "onboarding",
+            "induction process",
+            "office guidelines",
+            "guidelines",
+            "benefits guide",
+            "insurance",
+            "provident fund",
+            "gratuity",
+            "holiday list",
+            "public holidays",
+            "leave without pay",
+            "loss of pay",
+            "approve",
+            "approval",
+            "requires approval",
+            "sanction leave",
+            "approving authority",
+            "reimbursement",
+            "receipt",
+            "password",
+            "weekend",
+            "return equipment",
+            "return my it equipment",
+            "return laptop",
+            "returning company property",
+            "offboarding",
+            "work from the office",
+            "days in office",
+            "office days",
+            "wfo",
+        ]
+    ):
         return "POLICY"
 
-    # Expenses
-    if any(phrase in query for phrase in [
-        "expense",
-        "expenses",
-        "spent",
-        "spending",
-    ]):
-        return "EXPENSE"
-
-    # IT assets
-    if any(phrase in query for phrase in [
-        "laptop",
-        "computer",
-        "it asset",
-        "asset assigned",
-        "device assigned",
-        "monitor",
-    ]):
-        return "IT_ASSET"
-
-    # Office
-    if any(phrase in query for phrase in [
-        "office location",
-        "office address",
-        "where is the office",
-        "where is my office",
-        "my office",
-        "working hours",
-        "office timings",
-    ]):
+    # --------------------------------------------------------
+    # 4. OFFICE / LOCATION (employee-specific — their own office)
+    #
+    #    Removed the old standalone "location" keyword — it was
+    #    too generic and could misfire on unrelated sentences
+    #    that merely contained the word "location".
+    # --------------------------------------------------------
+    if any(
+        phrase in query
+        for phrase in [
+            "office location",
+            "office address",
+            "where is the office",
+            "where is my office",
+            "where is my office location",
+            "what is my office location",
+            "my office location",
+            "my office",
+            "where is my location",
+            "what is my location",
+            "my location",
+            "working hours",
+            "office timings",
+            "where am i based",
+            "which city am i based",
+            "my base location",
+            "based in",
+        ]
+    ):
         return "OFFICE"
 
-    # Employee information
-    # Employee information
-    if any(phrase in query for phrase in [
-        "my profile",
-        "my details",
-        "my name",
-        "what is my name",
-        "what's my name",
-        "tell me my name",
-        "my department",
-        "my designation",
-        "my manager",
-        "who is my manager",
-    ]):
+    # --------------------------------------------------------
+    # 5. IT ASSET (employee-specific — what's assigned to them)
+    # --------------------------------------------------------
+    if any(
+        phrase in query
+        for phrase in [
+            "laptop",
+            "computer",
+            "it asset",
+            "asset assigned",
+            "device assigned",
+            "monitor",
+            "keyboard",
+            "mouse",
+            "headset",
+        ]
+    ):
+        return "IT_ASSET"
+
+    # --------------------------------------------------------
+    # 6. EXPENSE
+    # --------------------------------------------------------
+    if any(
+        phrase in query
+        for phrase in [
+            "expense",
+            "expenses",
+            "spent",
+            "spending",
+        ]
+    ):
+        return "EXPENSE"
+
+    # --------------------------------------------------------
+    # 7. EMPLOYEE INFORMATION
+    # --------------------------------------------------------
+    if any(
+        phrase in query
+        for phrase in [
+            "my profile",
+            "my details",
+            "my department",
+            "my designation",
+            "my manager",
+            "who is my manager",
+            "my name",
+            "what is my name",
+            "who am i",
+            "tell me my details",
+            "which department",
+            "what department",
+        ]
+    ):
         return "EMPLOYEE_INFO"
 
     return "UNKNOWN"

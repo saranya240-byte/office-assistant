@@ -1,174 +1,50 @@
-import json
 import re
 from datetime import datetime
-
-import ollama
-
-from app.utils.config import OLLAMA_MODEL
-
-
-PARAMETER_PROMPT = """
-You are the leave parameter extraction component of TechNova Pvt. Ltd.'s
-Office Assistant.
-
-Extract leave request information from the employee's query.
-
-Return ONLY valid JSON in exactly this format:
-
-{
-    "leave_type": "",
-    "start_date": "",
-    "end_date": "",
-    "reason": ""
-}
-
-Allowed leave types:
-- Casual Leave
-- Earned Leave
-- Sick Leave
-
-Date format:
-- Convert dates to YYYY-MM-DD whenever the exact date can be determined.
-
-Rules:
-1. Do not invent missing information.
-2. If leave type is missing, return an empty string.
-3. If start date is missing, return an empty string.
-4. If end date is missing, return an empty string.
-5. If reason is missing, return an empty string.
-6. Extract only information actually provided by the employee.
-7. Return only JSON. Do not add explanations.
-"""
 
 
 def extract_leave_parameters(query: str) -> dict:
     """
-    Extract leave parameters using Ollama.
-
-    If Ollama fails or returns invalid information,
-    fall back to deterministic regex-based extraction.
+    Extract leave type, dates, and reason from an employee query.
     """
-
-    query = query.strip()
 
     if not query:
-        return empty_parameters()
-
-    # -----------------------------------
-    # Try Ollama first
-    # -----------------------------------
-    try:
-        prompt = f"""
-{PARAMETER_PROMPT}
-
-Employee query:
-{query}
-
-JSON:
-"""
-
-        response = ollama.chat(
-            model=OLLAMA_MODEL,
-            messages=[
-                {
-                    "role": "user",
-                    "content": prompt,
-                }
-            ],
-        )
-
-        text = response["message"]["content"]
-
-        if text:
-            text = text.strip()
-
-            # Remove markdown code fences if Ollama adds them
-            text = re.sub(
-                r"```json\s*",
-                "",
-                text,
-                flags=re.IGNORECASE,
-            )
-            text = re.sub(r"```\s*", "", text)
-
-            data = json.loads(text)
-
-            if isinstance(data, dict):
-                result = {
-                            "leave_type": str(
-                                data.get("leave_type", "")
-                            ).strip(),
-
-                            "start_date": str(
-                                data.get("start_date", "")
-                            ).strip(),
-
-                            "end_date": str(
-                                data.get("end_date", "")
-                            ).strip(),
-
-                            "reason": str(
-                                data.get("reason", "")
-                            ).strip().lower(),
-                        }
-
-                # Validate leave type
-                valid_leave_types = {
-                    "Casual Leave",
-                    "Earned Leave",
-                    "Sick Leave",
-                }
-
-                if result["leave_type"] not in valid_leave_types:
-                    result["leave_type"] = ""
-
-                # Validate dates
-                if result["start_date"]:
-                    result["start_date"] = normalize_date(
-                        result["start_date"]
-                    )
-
-                if result["end_date"]:
-                    result["end_date"] = normalize_date(
-                        result["end_date"]
-                    )
-
-                return result
-
-    except Exception:
-        # Ollama failure → use deterministic fallback
-        pass
-
-    # -----------------------------------
-    # Deterministic fallback
-    # -----------------------------------
-    return extract_leave_parameters_fallback(query)
-
-
-def extract_leave_parameters_fallback(query: str) -> dict:
-    """
-    Original regex-based parameter extraction.
-    """
+        return {
+            "leave_type": "",
+            "start_date": "",
+            "end_date": "",
+            "reason": "",
+        }
 
     query_lower = query.lower()
 
-    # -------------------------
+    # --------------------------------
     # Leave type
-    # -------------------------
+    # --------------------------------
+
     leave_type = ""
 
-    if "casual leave" in query_lower or "casual" in query_lower:
+    if (
+        "casual leave" in query_lower
+        or "casual" in query_lower
+    ):
         leave_type = "Casual Leave"
 
-    elif "earned leave" in query_lower or "earned" in query_lower:
+    elif (
+        "earned leave" in query_lower
+        or "earned" in query_lower
+    ):
         leave_type = "Earned Leave"
 
-    elif "sick leave" in query_lower or "sick" in query_lower:
+    elif (
+        "sick leave" in query_lower
+        or "sick" in query_lower
+    ):
         leave_type = "Sick Leave"
 
-    # -------------------------
+    # --------------------------------
     # Dates
-    # -------------------------
+    # --------------------------------
+
     dates = re.findall(
         r"\b\d{4}-\d{2}-\d{2}\b"
         r"|\b\d{2}-\d{2}-\d{4}\b"
@@ -179,23 +55,40 @@ def extract_leave_parameters_fallback(query: str) -> dict:
     start_date = ""
     end_date = ""
 
-    if len(dates) >= 2:
+    # A single date means a one-day leave request — treat it as
+    # both the start and end date. Previously a query like
+    # "apply sick leave on 2026-09-10" extracted NO dates at all
+    # because the code only handled the 2-dates case.
+    if len(dates) == 1:
+        single_date = normalize_date(dates[0])
+        start_date = single_date
+        end_date = single_date
+
+    elif len(dates) >= 2:
         start_date = normalize_date(dates[0])
         end_date = normalize_date(dates[1])
 
-    # -------------------------
+    # --------------------------------
     # Reason
-    # -------------------------
+    # --------------------------------
+
     reason = ""
 
+    # Kept "for" as a trigger (needed for phrasing like "... for
+    # personal work"), but added a negative lookahead so it no
+    # longer matches "for 2 days" / "for 3 days" — previously
+    # "apply casual leave for 2 days because I am travelling"
+    # incorrectly set the reason to "2 days because I am
+    # travelling" instead of "I am travelling".
     reason_match = re.search(
-        r"(?:because|reason is|for)\s+(.+)",
+        r"(?:because|due to|reason is|reason:|for)\s+"
+        r"(?!\d+\s*days?\b)(.+)",
         query,
         re.IGNORECASE,
     )
 
     if reason_match:
-        reason = reason_match.group(1).strip()
+        reason = reason_match.group(1).strip().rstrip(".?!")
 
     return {
         "leave_type": leave_type,
@@ -206,6 +99,10 @@ def extract_leave_parameters_fallback(query: str) -> dict:
 
 
 def normalize_date(date_string: str) -> str:
+    """
+    Convert supported date formats to YYYY-MM-DD.
+    """
+
     formats = [
         "%Y-%m-%d",
         "%d-%m-%Y",
@@ -213,23 +110,18 @@ def normalize_date(date_string: str) -> str:
     ]
 
     for date_format in formats:
+
         try:
             date = datetime.strptime(
                 date_string,
                 date_format,
             )
-            return date.strftime("%Y-%m-%d")
+
+            return date.strftime(
+                "%Y-%m-%d"
+            )
 
         except ValueError:
             continue
 
     return ""
-
-
-def empty_parameters() -> dict:
-    return {
-        "leave_type": "",
-        "start_date": "",
-        "end_date": "",
-        "reason": "",
-    }

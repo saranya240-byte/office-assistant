@@ -11,13 +11,10 @@ from app.utils.memory import (
     format_conversation,
 )
 
-from app.utils.security import validate_employee_access
-
 
 def build_context(messages: list[dict]) -> str:
     """
     Convert previous conversation messages into a simple text context.
-
     Only the most recent 10 messages are included.
     """
 
@@ -47,63 +44,11 @@ def process_query(
     reason: str = "",
     conversation_history: list[dict] | None = None,
 ) -> dict:
-    """
-    Main orchestrator for the TechNova Office Assistant.
-
-    Flow:
-
-    User Query
-        ↓
-    Security Validation
-        ↓
-    Intent Agent
-        ↓
-    ┌───────────────┬──────────────────┬────────────────────┐
-    │               │                  │
-    POLICY      EMPLOYEE QUERY      APPLY LEAVE
-    │               │                  │
-    RAG         Employee Tool    Parameter Extraction
-    │               │                  │
-    └───────────────┴──────────────────┴───────────────┐
-                                                       ↓
-                                                Action Tool
-                                                       ↓
-                                                Response Agent
-                                                       ↓
-                                                  Final Response
-
-    Conversation memory is used for context and leave parameter extraction,
-    but the CURRENT query alone is used to determine intent.
-    """
-
-    query = query.strip()
 
     conversation_history = conversation_history or []
 
     # ---------------------------------------------------------
-    # SECURITY / ACCESS CONTROL
-    # ---------------------------------------------------------
-
-    access = validate_employee_access(employee_id)
-
-    if not access["allowed"]:
-        return {
-            "intent": "SECURITY",
-            "route": "NONE",
-            "query": query,
-            "conversation_context": "",
-            "result": {
-                "success": False,
-                "message": access["message"],
-            },
-            "response": access["message"],
-        }
-
-    # Use the validated/normalized employee ID
-    employee_id = access["employee_id"]
-
-    # ---------------------------------------------------------
-    # CONVERSATION MEMORY
+    # Get conversation memory
     # ---------------------------------------------------------
 
     short_term = get_short_term_memory(
@@ -129,17 +74,13 @@ def process_query(
     )
 
     # ---------------------------------------------------------
-    # INTENT CLASSIFICATION
-    # ---------------------------------------------------------
-    #
-    # Only the CURRENT query is passed to the intent agent.
-    # Conversation context is used later for leave parameters.
+    # Classify CURRENT query only
     # ---------------------------------------------------------
 
     intent = classify_intent(query)
 
     # ---------------------------------------------------------
-    # POLICY → RAG → RESPONSE AGENT
+    # POLICY → RAG → RESPONSE
     # ---------------------------------------------------------
 
     if intent == "POLICY":
@@ -158,21 +99,7 @@ def process_query(
         }
 
     # ---------------------------------------------------------
-    # EMPLOYEE QUERY → EMPLOYEE TOOL → RESPONSE AGENT
-    # ---------------------------------------------------------
-    #
-    # IMPORTANT:
-    # Pass the CURRENT query to generate_response().
-    #
-    # This allows questions such as:
-    #
-    # "What is my name?"
-    # → "Your name is Ananya Sharma."
-    #
-    # "Who is my manager?"
-    # → "Your manager is Kavya Iyer."
-    #
-    # instead of returning the complete employee profile.
+    # EMPLOYEE QUERY → EMPLOYEE TOOL → RESPONSE
     # ---------------------------------------------------------
 
     if intent in {
@@ -189,10 +116,7 @@ def process_query(
             query=query,
         )
 
-        response = generate_response(
-            result,
-            query,
-        )
+        response = generate_response(result)
 
         return {
             "intent": intent,
@@ -204,60 +128,21 @@ def process_query(
         }
 
     # ---------------------------------------------------------
-    # APPLY LEAVE → PARAMETER EXTRACTION → ACTION TOOL
+    # APPLY LEAVE
     # ---------------------------------------------------------
 
     if intent == "APPLY_LEAVE":
 
-        # By default, extract parameters from the current query.
-        parameter_query = query
+        # IMPORTANT:
+        # Extract parameters ONLY from the current query.
+        # Do not pass conversation history here.
+        parameters = extract_leave_parameters(query)
 
-        # If conversation context exists, use it to help extract
-        # missing leave parameters.
-
-        if context:
-
-            parameter_query = f"""
-Previous conversation context:
-
-{context}
-
-Current employee query:
-
-{query}
-
-Extract the leave parameters for the CURRENT request.
-Do not use unrelated information from previous conversations.
-"""
-
-        parameters = extract_leave_parameters(parameter_query)
-
-        # -----------------------------------------------------
-        # Use extracted values first.
-        #
-        # If extraction did not find a value, use the value
-        # explicitly supplied to process_query().
-        # -----------------------------------------------------
-
-        final_leave_type = (
-            parameters["leave_type"] or leave_type
-        )
-
-        final_start_date = (
-            parameters["start_date"] or start_date
-        )
-
-        final_end_date = (
-            parameters["end_date"] or end_date
-        )
-
-        final_reason = (
-            parameters["reason"] or reason
-        )
-
-        # -----------------------------------------------------
-        # ACTION TOOL
-        # -----------------------------------------------------
+        # Explicit parameters from the current query take priority.
+        final_leave_type = parameters["leave_type"] or leave_type
+        final_start_date = parameters["start_date"] or start_date
+        final_end_date = parameters["end_date"] or end_date
+        final_reason = parameters["reason"] or reason
 
         result = handle_action(
             intent=intent,
@@ -267,10 +152,6 @@ Do not use unrelated information from previous conversations.
             end_date=final_end_date,
             reason=final_reason,
         )
-
-        # -----------------------------------------------------
-        # RESPONSE AGENT
-        # -----------------------------------------------------
 
         response = generate_response(result)
 
@@ -306,4 +187,3 @@ Do not use unrelated information from previous conversations.
         "message": response,
         "response": response,
     }
-

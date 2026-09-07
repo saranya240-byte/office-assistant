@@ -1,206 +1,239 @@
-from pathlib import Path
 import json
-import ollama
+from pathlib import Path
 
-from app.utils.config import OLLAMA_MODEL
+from ollama import Client
 
-
-BASE_PATH = Path(__file__).resolve().parent.parent
-PROMPT_PATH = BASE_PATH / "prompts" / "response_prompt.txt"
-
-
-def load_prompt() -> str:
-    return PROMPT_PATH.read_text(encoding="utf-8")
+from app.utils.config import (
+    OLLAMA_HOST,
+    OLLAMA_MODEL,
+)
 
 
-def generate_response(result: dict, query: str = "") -> str:
+PROMPT_PATH = (
+    Path(__file__).resolve().parent.parent
+    / "prompts"
+    / "response_prompt.txt"
+)
+
+
+with open(PROMPT_PATH, "r", encoding="utf-8") as file:
+    RESPONSE_PROMPT = file.read()
+
+
+client = Client(host=OLLAMA_HOST)
+
+
+def _format_citations(citations: list) -> str:
     """
-    Convert a structured tool/RAG result into a concise
-    employee-facing response using Ollama.
-
-    The original query is used for simple employee-information
-    questions so that the response contains only the requested
-    information.
-    """
-
-    # ---------------------------------------------------------
-    # Handle failed results first
-    # ---------------------------------------------------------
-
-    if not result.get("success", True):
-        return result.get(
-            "message",
-            "The request could not be processed.",
-        )
-
-    # ---------------------------------------------------------
-    # Deterministic employee-information responses
-    # ---------------------------------------------------------
-
-    normalized_query = query.strip().lower()
-
-    if "manager" in normalized_query and "manager" in result:
-        return f"Your manager is {result['manager']}."
-
-    if "name" in normalized_query and "name" in result:
-        return f"Your name is {result['name']}."
-
-    if "department" in normalized_query and "department" in result:
-        return f"You work in the {result['department']} department."
-
-    if "designation" in normalized_query and "designation" in result:
-        return f"Your designation is {result['designation']}."
-
-    if "location" in normalized_query and "location" in result:
-        return f"Your office location is {result['location']}."
-
-    # ---------------------------------------------------------
-    # Leave balance
-    # ---------------------------------------------------------
-
-    if (
-        "casual_leave" in result
-        or "earned_leave" in result
-        or "sick_leave" in result
-    ):
-        return format_leave_balance(result)
-
-    # ---------------------------------------------------------
-    # Leave request
-    # ---------------------------------------------------------
-
-    if "request_id" in result and "leave_type" in result:
-        if "message" in result:
-            return result["message"]
-
-        return (
-            f"Leave request {result['request_id']} is "
-            f"{result.get('status', 'processed')}."
-        )
-
-    # ---------------------------------------------------------
-    # Employee information
-    # ---------------------------------------------------------
-
-    if (
-        "name" in result
-        and "department" in result
-        and "designation" in result
-    ):
-        return format_employee_information(result)
-
-    # ---------------------------------------------------------
-    # For policy/RAG and other complex results, use Ollama
-    # ---------------------------------------------------------
-
-    prompt_template = load_prompt()
-
-    result_json = json.dumps(
-        result,
-        indent=2,
-        default=str,
-    )
-
-    response = ollama.chat(
-        model=OLLAMA_MODEL,
-        messages=[
-            {
-                "role": "system",
-                "content": prompt_template,
-            },
-            {
-                "role": "user",
-                "content": (
-                    "Convert the following structured result "
-                    "into the final employee-facing answer.\n\n"
-                    "IMPORTANT:\n"
-                    "- Return ONLY the natural-language answer.\n"
-                    "- Do NOT return JSON.\n"
-                    "- Use ONLY the information in the structured result.\n\n"
-                    f"Structured result:\n{result_json}"
-                ),
-            },
-        ],
-    )
-
-    answer = response["message"]["content"].strip()
-
-    # ---------------------------------------------------------
-    # Safety check:
-    # If Ollama returns JSON, convert it to readable text.
-    # ---------------------------------------------------------
-
-    if answer.startswith("{") and answer.endswith("}"):
-        try:
-            parsed = json.loads(answer)
-
-            if isinstance(parsed, dict):
-                return format_structured_result(parsed)
-
-        except json.JSONDecodeError:
-            pass
-
-    return answer
-
-
-def format_leave_balance(result: dict) -> str:
-    """
-    Format leave balance information.
+    Deterministically format policy citations so the employee
+    always sees a reference, regardless of what the LLM writes
+    in the free-text answer.
     """
 
-    lines = ["Leave balance:"]
+    lines = []
+    seen = set()
 
-    if "casual_leave" in result:
-        lines.append(
-            f"- Casual Leave: {result['casual_leave']} days"
-        )
+    for citation in citations:
 
-    if "earned_leave" in result:
-        lines.append(
-            f"- Earned Leave: {result['earned_leave']} days"
-        )
+        source = citation.get("source", "Unknown")
+        page = citation.get("page", "Unknown")
+        key = (source, page)
 
-    if "sick_leave" in result:
-        lines.append(
-            f"- Sick Leave: {result['sick_leave']} days"
-        )
+        if key in seen:
+            continue
 
-    if "wfh_days_used" in result:
-        lines.append(
-            f"- WFH days used: {result['wfh_days_used']}"
-        )
+        seen.add(key)
+        lines.append(f"- {source} (Page {page})")
 
     return "\n".join(lines)
 
 
-def format_employee_information(result: dict) -> str:
-    """
-    Format a complete employee profile.
-    """
+def generate_response(result: dict) -> str:
 
-    return (
-        f"Employee: {result['name']}\n"
-        f"Department: {result['department']}\n"
-        f"Designation: {result['designation']}\n"
-        f"Manager: {result.get('manager', 'N/A')}\n"
-        f"Location: {result.get('location', 'N/A')}"
-    )
+    if not result:
+        return "I could not find enough information to answer your request."
 
+    # ---------------------------------------------------------
+    # Failed result
+    # ---------------------------------------------------------
 
-def format_structured_result(result: dict) -> str:
-    """
-    Fallback formatter for cases where the LLM returns
-    structured JSON instead of natural language.
-    """
-
-    if not result.get("success", True):
+    if not result.get("success", False):
         return result.get(
             "message",
-            "The request could not be processed.",
+            "I could not complete your request.",
         )
 
     # ---------------------------------------------------------
-    # Leave balance
+    # Policy (RAG) results
+    #
+    # Previously this fell through to the generic "Other results"
+    # branch below, which dumped the ENTIRE results list (raw
+    # chunk text, scores, everything) into the prompt and relied
+    # on the LLM to remember to cite its source. Now we build a
+    # tighter context from the top chunks and always append a
+    # deterministic citation block, so citations never depend on
+    # the LLM behaving.
+    # ---------------------------------------------------------
+
+    if "citations" in result and "results" in result:
+
+        top_results = result["results"][:4]
+
+        context = "\n\n".join(
+            f"[{item.get('source', 'Unknown')}, "
+            f"Page {item.get('page', 'Unknown')}]\n"
+            f"{item.get('text', '')}"
+            for item in top_results
+        )
+
+        prompt = f"""
+{RESPONSE_PROMPT}
+
+Employee question:
+
+{result.get('query', '')}
+
+Relevant policy context:
+
+{context}
+
+IMPORTANT RULES:
+
+1. Use ONLY the policy context above.
+2. Do not invent information that is not present in the context.
+3. Be concise and clear.
+4. Do not mention Ollama, Python, or internal agents.
+5. Do not add citations yourself — they are appended separately.
+"""
+
+        try:
+
+            response = client.chat(
+                model=OLLAMA_MODEL,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": prompt,
+                    }
+                ],
+            )
+
+            answer = response["message"]["content"].strip()
+
+        except Exception as exc:
+
+            answer = f"Unable to generate response: {exc}"
+
+        citation_text = _format_citations(result.get("citations", []))
+
+        if citation_text:
+            return f"{answer}\n\nSource(s):\n{citation_text}"
+
+        return answer
+
+    # ---------------------------------------------------------
+    # Office
+    # ---------------------------------------------------------
+
+    if "office_id" in result:
+
+        return (
+            f"Your office is located in {result['location']} "
+            f"at {result['address']}. "
+            f"Working hours are {result['working_hours']} "
+            f"from {result['working_days']}."
+        )
+
+    # ---------------------------------------------------------
+    # IT Assets
+    # ---------------------------------------------------------
+
+    if "assets" in result:
+
+        assets = result.get("assets", [])
+
+        if not assets:
+            return "You currently do not have any IT assets assigned."
+
+        responses = []
+
+        for asset in assets:
+
+            asset_type = asset.get("asset_type", "Asset")
+            asset_name = asset.get("asset_name", "Unknown")
+            asset_id = asset.get("asset_id", "Unknown")
+            issue_date = asset.get("issue_date", "Unknown")
+            warranty = asset.get("warranty_expiry", "Unknown")
+            status = asset.get("status", "Unknown")
+
+            responses.append(
+                f"• Asset ID: {asset_id}\n"
+                f"• Asset Type: {asset_type}\n"
+                f"• Asset Name: {asset_name}\n"
+                f"• Issue Date: {issue_date}\n"
+                f"• Warranty Expiry: {warranty}\n"
+                f"• Status: {status}"
+            )
+
+        header = (
+            "Your assigned IT asset is:"
+            if len(responses) == 1
+            else "Your assigned IT assets are:"
+        )
+
+        return header + "\n\n" + "\n\n".join(responses)
+
+    # ---------------------------------------------------------
+    # Expenses
+    #
+    # This previously had no dedicated branch and fell through
+    # to the generic LLM fallback. Now it's formatted directly,
+    # which is faster and doesn't depend on Ollama being up.
+    # ---------------------------------------------------------
+
+    if "total_amount" in result:
+
+        records = result.get("records", [])
+
+        if not records:
+            return "You have no recorded expenses."
+
+        lines = []
+
+        for record in records:
+
+            category = record.get("category", "Expense")
+            amount = record.get("amount", 0)
+            date = record.get("date", "Unknown")
+
+            lines.append(f"• {category}: ₹{amount} on {date}")
+
+        return (
+            f"Here are your expense records "
+            f"(Total: ₹{result.get('total_amount', 0)}):\n\n"
+            + "\n".join(lines)
+        )
+
+    # ---------------------------------------------------------
+    # Employee Information
+    # ---------------------------------------------------------
+
+    if (
+        "employee_id" in result
+        and "designation" in result
+        and "department" in result
+    ):
+
+        return (
+            f"You are {result.get('name', 'the employee')}, "
+            f"working as a {result.get('designation', '')} "
+            f"in the {result.get('department', '')} department. "
+            f"Your manager is {result.get('manager', '')} "
+            f"and your office location is {result.get('location', '')}."
+        )
+
+    # ---------------------------------------------------------
+    # Leave Balance
     # ---------------------------------------------------------
 
     if (
@@ -208,37 +241,74 @@ def format_structured_result(result: dict) -> str:
         or "earned_leave" in result
         or "sick_leave" in result
     ):
-        return format_leave_balance(result)
-
-    # ---------------------------------------------------------
-    # Leave request
-    # ---------------------------------------------------------
-
-    if "request_id" in result and "leave_type" in result:
-        if "message" in result:
-            return result["message"]
 
         return (
-            f"Leave request {result['request_id']} is "
-            f"{result.get('status', 'processed')}."
+            f"You have "
+            f"{result.get('casual_leave', 0)} Casual Leave days, "
+            f"{result.get('earned_leave', 0)} Earned Leave days, "
+            f"{result.get('sick_leave', 0)} Sick Leave days remaining."
         )
 
     # ---------------------------------------------------------
-    # Employee information
+    # Leave Application
     # ---------------------------------------------------------
 
-    if (
-        "name" in result
-        and "department" in result
-        and "designation" in result
-    ):
-        return format_employee_information(result)
+    if "request_id" in result:
+
+        return (
+            f"Your {result.get('leave_type', '')} request "
+            f"has been submitted successfully.\n\n"
+            f"Request ID: {result.get('request_id')}\n"
+            f"Start Date: {result.get('start_date')}\n"
+            f"End Date: {result.get('end_date')}\n"
+            f"Working Days: {result.get('working_days')}\n"
+            f"Status: {result.get('status', 'Pending')}"
+        )
 
     # ---------------------------------------------------------
-    # Generic result
+    # Other results → Ollama (fallback for anything unhandled)
     # ---------------------------------------------------------
 
-    if "message" in result:
-        return str(result["message"])
+    prompt = f"""
+{RESPONSE_PROMPT}
 
-    return "The request was processed successfully."
+Structured result from the Office Assistant:
+
+{json.dumps(result, indent=2, default=str)}
+
+Generate the final employee-facing response.
+
+IMPORTANT RULES:
+
+1. Use ONLY information present in the structured result.
+2. Never use information from previous conversations.
+3. Never invent employee information.
+4. Never add information that is not present in the structured result.
+5. Do not mention Ollama.
+6. Do not mention Python.
+7. Do not mention internal agents.
+8. Return only the employee-facing answer.
+"""
+
+    try:
+
+        response = client.chat(
+            model=OLLAMA_MODEL,
+            messages=[
+                {
+                    "role": "user",
+                    "content": prompt,
+                }
+            ],
+        )
+
+        answer = response["message"]["content"]
+
+        if answer:
+            return answer.strip()
+
+        return "I could not generate a response."
+
+    except Exception as exc:
+
+        return f"Unable to generate response: {exc}"
